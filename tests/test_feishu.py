@@ -110,3 +110,48 @@ def test_never_logs_payload(caplog):
     make(rec, secret=SECRET).send_text("payload-text-xyz")
     assert "payload-text-xyz" not in caplog.text
     assert URL not in caplog.text and "tok-abc123" not in caplog.text and SECRET not in caplog.text
+
+
+def test_gate_exception_returns_failed():
+    def gate():
+        raise RuntimeError(f"db down {URL}")
+
+    rec = Recorder()
+    result = make(rec, gate=gate).send_text("hi")
+    assert result.status == "failed"
+    assert URL not in result.message and "tok-abc123" not in result.message
+    assert rec.requests == []
+
+
+def test_httpx_filter_thread_safe():
+    import threading
+
+    errors, stop = [], threading.Event()
+    log = logging.getLogger("httpx")
+    old = log.level
+    log.setLevel(logging.INFO)
+
+    def register():
+        i = 0
+        while not stop.is_set():
+            FeishuWebhook(f"https://open.feishu.cn/open-apis/bot/v2/hook/race-token-{i:08d}")
+            i += 1
+
+    def emit():
+        try:
+            for _ in range(20000):
+                log.info("HTTP Request: POST %s", URL)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    threads = [threading.Thread(target=register), threading.Thread(target=emit)]
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        log.setLevel(old)
+    assert errors == []

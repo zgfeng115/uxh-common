@@ -9,6 +9,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,13 +35,24 @@ class SendResult:
 
 
 class _RedactFilter(logging.Filter):
+    """Copy-on-write: filter() reads an immutable tuple, so webhooks created in
+    other threads never mutate what an in-flight log record iterates."""
+
     def __init__(self) -> None:
         super().__init__()
-        self.secrets: set[str] = set()
+        self._lock = threading.Lock()
+        self._secrets: tuple[str, ...] = ()
+
+    def add(self, items: list[str]) -> None:
+        with self._lock:
+            merged = set(self._secrets).union(items)
+            if len(merged) != len(self._secrets):
+                self._secrets = tuple(sorted(merged, key=len, reverse=True))
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if self.secrets:
-            record.msg = redact(record.getMessage(), self.secrets)
+        secrets = self._secrets
+        if secrets:
+            record.msg = redact(record.getMessage(), secrets)
             record.args = None
         return True
 
@@ -60,7 +72,7 @@ class FeishuWebhook:
         self._transport = transport
         token = url.rstrip("/").rsplit("/", 1)[-1]
         self._sensitive = [s for s in (url, token, secret) if s]
-        _httpx_filter.secrets.update(self._sensitive)
+        _httpx_filter.add(self._sensitive)
 
     def send_text(self, text: str) -> SendResult:
         return self._send({"msg_type": "text", "content": {"text": text}})
@@ -69,13 +81,16 @@ class FeishuWebhook:
         return self._send({"msg_type": "interactive", "card": card})
 
     def _send(self, payload: dict) -> SendResult:
-        if self._gate is not None and not self._gate():
-            logger.info("feishu webhook status=suppressed")
-            return SendResult("suppressed")
-        if self._secret:
-            ts = str(int(time.time()))
-            payload = {**payload, "timestamp": ts, "sign": gen_sign(ts, self._secret)}
-        result = self._post(payload)
+        try:
+            if self._gate is not None and not self._gate():
+                logger.info("feishu webhook status=suppressed")
+                return SendResult("suppressed")
+            if self._secret:
+                ts = str(int(time.time()))
+                payload = {**payload, "timestamp": ts, "sign": gen_sign(ts, self._secret)}
+            result = self._post(payload)
+        except Exception as exc:  # e.g. a gate that reads a DB which is down
+            result = self._failed(None, f"{type(exc).__name__}: {exc}")
         log = logger.info if result.status == "sent" else logger.warning
         log("feishu webhook status=%s code=%s", result.status, result.code)
         return result

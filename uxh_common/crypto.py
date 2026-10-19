@@ -98,12 +98,13 @@ def decrypt(token: str, *, strict: bool = False, key: bytes | None = None) -> st
         return token
     try:
         combined = base64.urlsafe_b64decode(token.encode("ascii"))
-        plaintext = AESGCM(k).decrypt(combined[:_NONCE_LEN], combined[_NONCE_LEN:], None)
-        return plaintext.decode("utf-8")
+        return AESGCM(k).decrypt(combined[:_NONCE_LEN], combined[_NONCE_LEN:], None).decode("utf-8")
     except (ValueError, InvalidTag):
-        # binascii.Error, UnicodeError are ValueError subclasses; drop the chain so
-        # the original exception (which may echo the token) never surfaces.
-        raise DecryptError("decrypt failed") from None
+        # binascii.Error, UnicodeError are ValueError subclasses. Raise outside the
+        # except block: `from None` would still keep the original (which can hold
+        # the token, e.g. UnicodeEncodeError.object) on __context__.
+        pass
+    raise DecryptError("decrypt failed")
 
 
 def is_encrypted(value: str) -> bool:

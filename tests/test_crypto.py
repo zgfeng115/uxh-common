@@ -102,7 +102,7 @@ def test_tampered_token_raises_without_leak():
         crypto.decrypt(bad, key=KEY)
     assert str(ei.value) == "decrypt failed"
     assert bad not in str(ei.value) and "secret-plain" not in str(ei.value)
-    assert ei.value.__cause__ is None and ei.value.__suppress_context__
+    assert ei.value.__cause__ is None and ei.value.__context__ is None
 
 
 def test_legacy_plaintext_in_db_raises_decrypt_error():
@@ -123,3 +123,10 @@ def test_generate_key():
     raw = base64.urlsafe_b64decode(k)
     assert len(raw) == 32
     assert crypto.decrypt(crypto.encrypt("v", key=raw), key=raw) == "v"
+
+
+@pytest.mark.parametrize("token", ["中文密码", "plain-api-key-123", LEGACY[0][1][:-4] + "AAAA"])
+def test_decrypt_error_carries_no_context(token):
+    with pytest.raises(crypto.DecryptError) as ei:
+        crypto.decrypt(token, key=KEY)
+    assert ei.value.__context__ is None and ei.value.__cause__ is None
